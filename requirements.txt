@@ -1,0 +1,12 @@
+torch
+transformers
+fastapi
+uvicorn
+pydantic
+python-multipart
+requests
+Pillow
+numpy
+timm
+einops
+huggingface_hub

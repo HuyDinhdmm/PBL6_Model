@@ -1,0 +1,178 @@
+Hướng Dẫn Triển Khai InternVL/FastAPI bằng Docker (Hoàn Chỉnh)
+Mô hình triển khai này là lý tưởng cho việc host AI Server, sử dụng FastAPI để tạo API và Docker để đóng gói toàn bộ môi trường.
+
+I. Cấu trúc Thư mục Dự án
+Tạo một thư mục dự án và đặt các tệp sau vào đó:
+
+/InternVL_API_Project
+├── app.py             # Code chính: FastAPI, load model, inference logic
+├── requirements.txt   # Các thư viện Python cần thiết
+├── Dockerfile         # Công thức xây dựng môi trường Docker
+└── /internvl_local    # Thư mục chứa model InternVL đã tải về
+II. Mã nguồn Dự án (Source Code)
+1. File: requirements.txt
+Tệp này liệt kê các thư viện cần cài đặt:
+
+torch
+transformers
+fastapi
+uvicorn
+pydantic
+python-multipart
+requests
+Pillow
+numpy
+timm
+einops
+2. File: app.py (FastAPI Server)
+Tệp này bao gồm các hàm tiền xử lý ảnh và logic API. Đảm bảo rằng bạn đã sao chép toàn bộ các hàm tiền xử lý ảnh (build_transform, find_closest_aspect_ratio, dynamic_preprocess, load_image) vào tệp này.
+
+Python
+
+import os
+import io
+import torch
+import torchvision.transforms as T
+from PIL import Image
+from torchvision.transforms.functional import InterpolationMode
+from transformers import AutoModel, AutoTokenizer
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+import requests
+
+# --- CÁC HÀM TIỀN XỬ LÝ ẢNH CỦA BẠN (ĐƯỢC ĐẶT Ở ĐÂY) ---
+# ... (Bạn cần dán toàn bộ các hàm này vào đây: build_transform, find_closest_aspect_ratio, dynamic_preprocess, load_image) ...
+# Lưu ý: Vì lý do độ dài, tôi giả định bạn đã dán chúng vào đây
+
+# --- CẤU HÌNH GLOBAL ---
+# ĐƯỜNG DẪN CỤC BỘ BÊN TRONG CONTAINER
+LOCAL_MODEL_PATH = "/app/internvl_local/" 
+MODEL_NAME = "5CD-AI/Vintern-1B-v3_5" 
+
+# Khởi tạo đối tượng model và tokenizer rỗng
+model = None
+tokenizer = None
+app = FastAPI()
+
+# Định nghĩa Schema cho Request
+class InferenceRequest(BaseModel):
+    image_url: str 
+    question: str = '<image>\nTrích xuất tất cả thông tin hóa đơn sau dưới dạng đối tượng JSON.'
+    max_tokens: int = 1024
+    temperature: float = 0.0 
+
+@app.on_event("startup")
+async def load_model():
+    """Tải mô hình lên GPU một lần duy nhất khi server khởi động."""
+    global model, tokenizer
+    
+    # Tải Tokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH, trust_remote_code=True)
+        
+        # Tải Mô hình
+        model = AutoModel.from_pretrained(
+            LOCAL_MODEL_PATH,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+            use_flash_attn=False,
+        ).eval().cuda()
+        
+        print("✅ Mô hình InternVL đã tải thành công từ cục bộ lên GPU.")
+
+    except Exception as e:
+        print(f"LỖI KHỞI ĐỘNG MÔ HÌNH: {e}")
+        # Dùng exit(1) để Docker biết server không khởi động được
+        os._exit(1)
+        
+# API Endpoint Trích xuất Hóa đơn
+@app.post("/extract_invoice")
+async def extract_invoice(request: InferenceRequest):
+    if model is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="Model chưa sẵn sàng.")
+
+    try:
+        # Tải ảnh từ URL
+        response_img = requests.get(request.image_url, timeout=10)
+        response_img.raise_for_status() 
+        image_data = response_img.content
+        
+        # Tiền xử lý ảnh (sử dụng hàm load_image đã dán ở trên)
+        pixel_values = load_image(image_data, max_num=6).to(torch.bfloat16).cuda()
+        
+        # Cấu hình Generation
+        generation_config = dict(
+            max_new_tokens=request.max_tokens, 
+            do_sample=request.temperature > 0.0,
+            temperature=request.temperature,
+            num_beams=3, 
+            repetition_penalty=3.5
+        )
+        
+        # Chạy mô hình
+        with torch.no_grad():
+            response = model.chat(tokenizer, pixel_values, request.question, generation_config)
+
+        # Trả về kết quả
+        return {"status": "success", "extraction_result": response}
+
+    except Exception as e:
+        print(f"LỖI INFERENCE/REQUEST: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi xảy ra: {e}")
+3. File: Dockerfile
+Đây là công thức để tạo ra môi trường chạy trên GPU.
+
+Dockerfile
+
+# Sử dụng Base Image có sẵn PyTorch và CUDA Runtime
+# nvcr.io/nvidia/pytorch:24.03-py3 sử dụng Python 3.10
+FROM nvcr.io/nvidia/pytorch:24.03-py3
+
+# Thiết lập thư mục làm việc
+WORKDIR /app
+
+# Sao chép các tệp cài đặt và mã nguồn
+COPY requirements.txt .
+COPY app.py .
+
+# Sao chép mô hình đã tải về cục bộ vào Container
+# Đảm bảo thư mục internvl_local chứa model nằm ở thư mục gốc của dự án
+COPY internvl_local/ /app/internvl_local/
+
+# Cài đặt các thư viện Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Mở cổng 8000
+EXPOSE 8000
+
+# Lệnh khởi chạy server bằng Uvicorn
+# --host 0.0.0.0 là bắt buộc để truy cập từ bên ngoài Container
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"] 
+III. Các Lệnh Triển khai (Command Line)
+1. Xây dựng Docker Image
+Chạy lệnh này trong Terminal tại thư mục gốc của dự án:
+
+Bash
+
+docker build -t vintern-invoice-api:1.0 .
+2. Chạy Server AI (Test Cục bộ)
+Chạy Container, cấp quyền sử dụng GPU (--gpus all) và ánh xạ cổng 8000:
+
+Bash
+
+docker run --gpus all -d -p 8000:8000 --name vintern_server vintern-invoice-api:1.0
+3. Kiểm tra API
+Truy cập http://localhost:8000/docs để xem Swagger UI, hoặc dùng curl để test:
+
+Bash
+
+curl -X 'POST' \
+  'http://localhost:8000/extract_invoice' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "image_url": "https://i.imgur.com/u7e5qMh.png",
+  "question": "<image>Trích xuất tên người bán và tổng tiền dưới dạng JSON."
+}'
+Sau khi hoàn thành các bước này, bạn đã có một server AI ổn định để tích hợp vào ứng dụng của mình.
