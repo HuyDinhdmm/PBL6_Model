@@ -14,10 +14,29 @@ if sys.platform == 'win32':
 MODEL_DIR = "internvl_local"
 MODEL_ID = "5CD-AI/Vintern-1B-v3_5"
 
+def check_model_exists():
+    """Kiểm tra xem model đã được tải chưa."""
+    required_files = ['config.json', 'model.safetensors', 'tokenizer_config.json']
+    model_path = os.path.join(MODEL_DIR, required_files[0])
+    
+    if os.path.exists(model_path):
+        # Kiểm tra các file quan trọng khác
+        all_exist = all(os.path.exists(os.path.join(MODEL_DIR, f)) for f in required_files)
+        if all_exist:
+            return True
+    return False
+
 def download_model():
     """Tải model từ Hugging Face Hub về thư mục local."""
+    # Kiểm tra model đã tồn tại chưa
+    if check_model_exists():
+        print(f"[+] Model da ton tai tai: {os.path.abspath(MODEL_DIR)}")
+        print(f"[+] Bo qua viec tai lai.")
+        return
+    
     print(f"[*] Dang tai model {MODEL_ID} tu Hugging Face Hub...")
     print(f"[*] Thu muc dich: {os.path.abspath(MODEL_DIR)}")
+    print(f"[*] Qua trinh nay co the mat nhieu thoi gian...")
     
     try:
         # Tải toàn bộ model (bao gồm config, tokenizer, weights)

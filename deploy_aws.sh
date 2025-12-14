@@ -22,8 +22,8 @@ ssh -i "$KEY_FILE" ubuntu@"$EC2_IP" "mkdir -p ~/$PROJECT_DIR"
 
 # Upload files
 echo "📤 Upload files..."
-scp -i "$KEY_FILE" app.py requirements.txt Dockerfile ubuntu@"$EC2_IP":~/$PROJECT_DIR/
-scp -i "$KEY_FILE" -r internvl_local ubuntu@"$EC2_IP":~/$PROJECT_DIR/ || echo "⚠️  Thư mục internvl_local không tồn tại, sẽ cần tải model trên EC2"
+scp -i "$KEY_FILE" app.py requirements.txt Dockerfile download_model.py ubuntu@"$EC2_IP":~/$PROJECT_DIR/
+scp -i "$KEY_FILE" -r internvl_local ubuntu@"$EC2_IP":~/$PROJECT_DIR/ 2>/dev/null || echo "⚠️  Thư mục internvl_local không tồn tại, sẽ tự động tải model trên EC2"
 
 # Chạy script setup trên EC2
 echo "⚙️  Cài đặt Docker và NVIDIA Container Toolkit..."
@@ -50,6 +50,26 @@ ssh -i "$KEY_FILE" ubuntu@"$EC2_IP" << 'ENDSSH'
     # Kiểm tra GPU
     echo "🔍 Kiểm tra GPU..."
     nvidia-smi || echo "⚠️  GPU không được phát hiện!"
+ENDSSH
+
+# Tải model nếu chưa có
+echo "🤖 Kiểm tra và tải model nếu cần..."
+ssh -i "$KEY_FILE" ubuntu@"$EC2_IP" << 'ENDSSH'
+    cd ~/$PROJECT_DIR
+    
+    # Kiểm tra model đã tồn tại chưa
+    if [ ! -d "internvl_local" ] || [ ! -f "internvl_local/model.safetensors" ]; then
+        echo "📥 Model chưa có, bắt đầu tải từ Hugging Face Hub..."
+        echo "⏳ Quá trình này có thể mất 10-15 phút..."
+        
+        # Cài đặt huggingface_hub nếu chưa có
+        pip3 install --user huggingface_hub 2>/dev/null || python3 -m pip install --user huggingface_hub
+        
+        # Tải model
+        python3 download_model.py
+    else
+        echo "✅ Model đã tồn tại, bỏ qua việc tải lại."
+    fi
 ENDSSH
 
 # Build và chạy Docker container
