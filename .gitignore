@@ -1,7 +1,9 @@
 # Model directory - không commit model vào git
 internvl_local/
+UnBoundingDATASET/
 
-# Python
+# Python virtual environment
+pbl/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -12,6 +14,9 @@ venv/
 ENV/
 .venv
 
+# Test results
+result_*.json
+
 # IDE
 .idea/
 .vscode/
@@ -21,3 +26,5 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+

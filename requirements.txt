@@ -1,12 +1,11 @@
 torch
 transformers
-fastapi
-uvicorn
-pydantic
-python-multipart
+flask
+flask-cors
 requests
 Pillow
 numpy
 timm
 einops
 huggingface_hub
+

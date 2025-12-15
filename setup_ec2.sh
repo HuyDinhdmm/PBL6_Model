@@ -67,3 +67,5 @@ echo "1. Upload code lên EC2 (sử dụng SCP hoặc Git)"
 echo "2. Tải model: python3 download_model.py"
 echo "3. Build Docker: docker build -t vintern-invoice-api:1.0 ."
 echo "4. Chạy container: docker run --gpus all -d -p 8000:8000 --name vintern_server vintern-invoice-api:1.0"
+
+

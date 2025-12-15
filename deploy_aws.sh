@@ -103,3 +103,5 @@ echo "🌐 API có thể truy cập tại: http://$EC2_IP:8000"
 echo "📚 Swagger UI: http://$EC2_IP:8000/docs"
 echo ""
 echo "Để xem logs: ssh -i $KEY_FILE ubuntu@$EC2_IP 'docker logs -f vintern_server'"
+
+

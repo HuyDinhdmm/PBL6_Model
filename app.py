@@ -5,9 +5,9 @@ import torchvision.transforms as T
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import uvicorn
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
 import requests
 
 # --- CÁC HÀM TIỀN XỬ LÝ ẢNH ---
@@ -94,19 +94,85 @@ def load_image(image_data, input_size=448, max_num=6):
     return pixel_values
 
 # --- CẤU HÌNH GLOBAL ---
-# ĐƯỜNG DẪN CỤC BỘ BÊN TRONG CONTAINER
-LOCAL_MODEL_PATH = "/app/internvl_local/" 
-MODEL_NAME = "5CD-AI/Vintern-1B-v3_5" 
+# ĐƯỜNG DẪN MODEL - Tự động phát hiện môi trường
+MODEL_NAME = "5CD-AI/Vintern-1B-v3_5"
+
+# Kiểm tra đường dẫn Docker trước, nếu không có thì dùng đường dẫn local
+DOCKER_MODEL_PATH = "/app/internvl_local"
+LOCAL_MODEL_PATH = "internvl_local"
+
+# Chọn đường dẫn phù hợp
+if os.path.exists(DOCKER_MODEL_PATH):
+    LOCAL_MODEL_PATH = DOCKER_MODEL_PATH
+elif not os.path.exists(LOCAL_MODEL_PATH):
+    # Nếu cả hai đều không tồn tại, tạo thư mục local
+    os.makedirs(LOCAL_MODEL_PATH, exist_ok=True)
+
+LOCAL_MODEL_PATH = os.path.abspath(LOCAL_MODEL_PATH) 
 
 # Khởi tạo đối tượng model và tokenizer rỗng
 model = None
 tokenizer = None
-app = FastAPI()
 
-# Định nghĩa Schema cho Request
-class InferenceRequest(BaseModel):
-    image_url: str 
-    question: str = """<image>
+# Khởi tạo Flask app với CORS
+app = Flask(__name__)
+CORS(app)  # Cho phép tất cả origins, có thể cấu hình chi tiết hơn nếu cần
+
+def load_model():
+    """Tải mô hình lên GPU một lần duy nhất khi server khởi động."""
+    global model, tokenizer
+    
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            LOCAL_MODEL_PATH, 
+            trust_remote_code=True,
+            local_files_only=True
+        )
+        
+        model = AutoModel.from_pretrained(
+            LOCAL_MODEL_PATH,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+            use_flash_attn=False,
+            local_files_only=True
+        ).eval().cuda()
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise
+
+# Load model sẽ được gọi trong __main__ block
+
+# Endpoint root
+@app.route('/', methods=['GET'])
+def root():
+    """Endpoint root để kiểm tra server."""
+    return jsonify({
+        "status": "success",
+        "message": "InternVL Invoice Extraction API",
+        "version": "1.0",
+        "endpoints": {
+            "health": "/health",
+            "extract_invoice": "/extract_invoice"
+        }
+    }), 200
+
+# Endpoint health check
+@app.route('/health', methods=['GET'])
+def health():
+    """Kiểm tra trạng thái server và model."""
+    model_status = "ready" if (model is not None and tokenizer is not None) else "not_ready"
+    
+    return jsonify({
+        "status": "success",
+        "server": "running",
+        "model_status": model_status
+    }), 200 if model_status == "ready" else 503
+
+# Question mặc định cho trích xuất hóa đơn
+DEFAULT_QUESTION = """<image>
 Trích xuất tất cả các trường thông tin từ hóa đơn/biên lai trong ảnh dưới dạng đối tượng JSON.
 Các trường BẮT BUỘC phải trích xuất:
 - "Tên người bán"
@@ -115,65 +181,97 @@ Các trường BẮT BUỘC phải trích xuất:
 - "Tổng tiền thanh toán" (Total Amount)
 - "Danh sách món" (Mảng chứa "Tên món", "Đơn giá", "Số lượng")
 """
-    max_tokens: int = 1024
-    temperature: float = 0.0 
 
-@app.on_event("startup")
-async def load_model():
-    """Tải mô hình lên GPU một lần duy nhất khi server khởi động."""
-    global model, tokenizer
-    
-    # Tải Tokenizer
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH, trust_remote_code=True)
-        
-        # Tải Mô hình
-        model = AutoModel.from_pretrained(
-            LOCAL_MODEL_PATH,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,
-            use_flash_attn=False,
-        ).eval().cuda()
-        
-        print("✅ Mô hình InternVL đã tải thành công từ cục bộ lên GPU.")
-
-    except Exception as e:
-        print(f"LỖI KHỞI ĐỘNG MÔ HÌNH: {e}")
-        # Dùng exit(1) để Docker biết server không khởi động được
-        os._exit(1)
-        
-# API Endpoint Trích xuất Hóa đơn
-@app.post("/extract_invoice")
-async def extract_invoice(request: InferenceRequest):
+# API Endpoint Trích xuất Hóa đơn (chỉ cần ảnh)
+@app.route('/extract_invoice', methods=['POST'])
+def extract_invoice():
+    """Trích xuất thông tin từ hóa đơn/biên lai. Chỉ cần gửi ảnh."""
     if model is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model chưa sẵn sàng.")
+        return jsonify({
+            "status": "error",
+            "message": "Model chưa sẵn sàng."
+        }), 503
 
     try:
-        # Tải ảnh từ URL
-        response_img = requests.get(request.image_url, timeout=10)
-        response_img.raise_for_status() 
-        image_data = response_img.content
+        image_data = None
         
-        # Tiền xử lý ảnh (sử dụng hàm load_image đã dán ở trên)
+        # Kiểm tra xem có file upload không
+        if 'image' in request.files:
+            file = request.files['image']
+            if file.filename == '':
+                return jsonify({
+                    "status": "error",
+                    "message": "Không có file được chọn."
+                }), 400
+            image_data = file.read()
+        
+        # Nếu không có file upload, kiểm tra image_url
+        elif request.is_json:
+            data = request.get_json()
+            
+            if not data or 'image_url' not in data:
+                return jsonify({
+                    "status": "error",
+                    "message": "Cần cung cấp 'image_url' (JSON) hoặc upload file 'image' (multipart/form-data)."
+                }), 400
+            
+            image_url = data.get('image_url')
+            response_img = requests.get(image_url, timeout=10)
+            response_img.raise_for_status() 
+            image_data = response_img.content
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Cần cung cấp 'image_url' (JSON) hoặc upload file 'image' (multipart/form-data)."
+            }), 400
+        
+        if image_data is None:
+            return jsonify({
+                "status": "error",
+                "message": "Không thể lấy dữ liệu ảnh."
+            }), 400
+        
+        # Tiền xử lý ảnh
         pixel_values = load_image(image_data, max_num=6).to(torch.bfloat16).cuda()
         
-        # Cấu hình Generation
+        # Cấu hình Generation (mặc định)
         generation_config = dict(
-            max_new_tokens=request.max_tokens, 
-            do_sample=request.temperature > 0.0,
-            temperature=request.temperature,
+            max_new_tokens=1024, 
+            do_sample=False,
+            temperature=0.0,
             num_beams=3, 
             repetition_penalty=3.5
         )
         
-        # Chạy mô hình
+        # Chạy mô hình với question mặc định
         with torch.no_grad():
-            response = model.chat(tokenizer, pixel_values, request.question, generation_config)
+            response = model.chat(tokenizer, pixel_values, DEFAULT_QUESTION, generation_config)
 
         # Trả về kết quả
-        return {"status": "success", "extraction_result": response}
+        return jsonify({
+            "status": "success",
+            "data": {
+                "extraction_result": response
+            }
+        }), 200
 
+    except requests.exceptions.RequestException as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Không thể tải ảnh từ URL: {str(e)}"
+        }), 400
     except Exception as e:
-        print(f"LỖI INFERENCE/REQUEST: {e}")
-        raise HTTPException(status_code=500, detail=f"Lỗi xảy ra: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Lỗi xảy ra: {str(e)}"
+        }), 500
+
+if __name__ == '__main__':
+    try:
+        load_model()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        os._exit(1)
+    
+    app.run(host='0.0.0.0', port=8000, debug=False)

@@ -1,24 +1,29 @@
-# Sử dụng Base Image có sẵn PyTorch và CUDA Runtime
-# nvcr.io/nvidia/pytorch:24.03-py3 sử dụng Python 3.10
-FROM nvcr.io/nvidia/pytorch:24.03-py3
+# Dockerfile cho InternVL API trên AWS EC2
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
-# Thiết lập thư mục làm việc
+# Set working directory
 WORKDIR /app
 
-# Sao chép các tệp cài đặt và mã nguồn
+# Cài đặt Python và các dependencies hệ thống
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements và cài đặt Python packages
 COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy code
 COPY app.py .
+COPY download_model.py .
 
-# Sao chép mô hình đã tải về cục bộ vào Container
-# Đảm bảo thư mục internvl_local chứa model nằm ở thư mục gốc của dự án
-COPY internvl_local/ /app/internvl_local/
+# Tạo thư mục cho model (sẽ được mount hoặc tải vào)
+RUN mkdir -p /app/internvl_local
 
-# Cài đặt các thư viện Python
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Mở cổng 8000
+# Expose port
 EXPOSE 8000
 
-# Lệnh khởi chạy server bằng Uvicorn
-# --host 0.0.0.0 là bắt buộc để truy cập từ bên ngoài Container
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Chạy app
+CMD ["python3", "app.py"]

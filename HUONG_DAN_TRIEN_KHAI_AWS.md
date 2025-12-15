@@ -302,3 +302,5 @@ docker exec -it vintern_server ls -la /app/internvl_local/
 - Kiểm tra Security Group rules
 - Kiểm tra EC2 instance firewall
 - Kiểm tra container đang chạy: `docker ps`
+
+
