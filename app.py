@@ -1,5 +1,8 @@
 import os
 import io
+import uuid
+import threading
+import queue
 import torch
 import torchvision.transforms as T
 from PIL import Image
@@ -81,6 +84,7 @@ def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbna
 
 def load_image(image_data, input_size=448, max_num=6):
     """Tải và tiền xử lý ảnh từ bytes data."""
+    
     # Chuyển đổi bytes thành PIL Image
     if isinstance(image_data, bytes):
         image = Image.open(io.BytesIO(image_data)).convert('RGB')
@@ -114,13 +118,32 @@ LOCAL_MODEL_PATH = os.path.abspath(LOCAL_MODEL_PATH)
 model = None
 tokenizer = None
 
+# Tự động phát hiện device (GPU hoặc CPU)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"🔍 Sử dụng device: {device}")
+
+# Queue system để xử lý request tuần tự (vì chỉ có 1 CPU)
+# Cải thiện: Dùng Event thay vì polling
+request_queue = queue.Queue()
+processing_lock = threading.Lock()
+result_store = {}  # Lưu kết quả theo request_id
+result_lock = threading.Lock()
+request_events = {}  # Event để signal khi request xong
+event_lock = threading.Lock()
+
 # Khởi tạo Flask app với CORS
 app = Flask(__name__)
 CORS(app)  # Cho phép tất cả origins, có thể cấu hình chi tiết hơn nếu cần
 
 def load_model():
-    """Tải mô hình lên GPU một lần duy nhất khi server khởi động."""
-    global model, tokenizer
+    """Tải mô hình lên device (GPU hoặc CPU) một lần duy nhất khi server khởi động."""
+    global model, tokenizer, device
+    
+    # Đảm bảo device được phát hiện lại (phòng trường hợp thay đổi sau khi import)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"🔍 Đang tải model lên device: {device}")
+    if device == "cuda":
+        print(f"   GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     
     try:
         tokenizer = AutoTokenizer.from_pretrained(
@@ -129,14 +152,23 @@ def load_model():
             local_files_only=True
         )
         
+        # Chọn dtype phù hợp với device
+        # GPU: dùng bfloat16 (nhanh, tiết kiệm VRAM)
+        # CPU: dùng float32 (tương thích tốt)
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+        print(f"   Sử dụng dtype: {dtype}")
+        
+        # Load model
         model = AutoModel.from_pretrained(
             LOCAL_MODEL_PATH,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
             use_flash_attn=False,
             local_files_only=True
-        ).eval().cuda()
+        ).eval().to(device)
+        
+        print(f"✅ Model đã được tải thành công lên {device}")
 
     except Exception as e:
         import traceback
@@ -165,10 +197,27 @@ def health():
     """Kiểm tra trạng thái server và model."""
     model_status = "ready" if (model is not None and tokenizer is not None) else "not_ready"
     
+    # Thông tin device
+    device_info = {
+        "device": device,
+        "cuda_available": torch.cuda.is_available()
+    }
+    if torch.cuda.is_available():
+        device_info["gpu_name"] = torch.cuda.get_device_name(0)
+        device_info["gpu_memory"] = f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
+    
+    # Thông tin queue
+    queue_info = {
+        "queue_size": request_queue.qsize(),
+        "is_processing": processing_lock.locked()
+    }
+    
     return jsonify({
         "status": "success",
         "server": "running",
-        "model_status": model_status
+        "model_status": model_status,
+        "device": device_info,
+        "queue": queue_info
     }), 200 if model_status == "ready" else 503
 
 # Question mặc định cho trích xuất hóa đơn
@@ -181,6 +230,75 @@ Các trường BẮT BUỘC phải trích xuất:
 - "Tổng tiền thanh toán" (Total Amount)
 - "Danh sách món" (Mảng chứa "Tên món", "Đơn giá", "Số lượng")
 """
+
+def process_invoice_request(request_id, image_data):
+    """Xử lý request trích xuất hóa đơn (chạy trong worker thread)"""
+    try:
+        # Tiền xử lý ảnh
+        pixel_values = load_image(image_data).to(
+            torch.bfloat16 if device == "cuda" else torch.float32
+        ).to(device)
+        
+        # Cấu hình Generation (mặc định)
+        generation_config = dict(
+            max_new_tokens=1024, 
+            do_sample=False,
+            temperature=0.0,
+            num_beams=3, 
+            repetition_penalty=3.5
+        )
+        
+        # Chạy mô hình với question mặc định
+        with torch.no_grad():
+            response = model.chat(tokenizer, pixel_values, DEFAULT_QUESTION, generation_config)
+
+        # Lưu kết quả và signal event
+        with result_lock:
+            result_store[request_id] = {
+                "status": "success",
+                "data": {
+                    "extraction_result": response
+                }
+            }
+        
+        # Signal event để client biết đã xong
+        with event_lock:
+            if request_id in request_events:
+                request_events[request_id].set()
+    except Exception as e:
+        # Lưu lỗi và signal event
+        with result_lock:
+            result_store[request_id] = {
+                "status": "error",
+                "message": f"Lỗi xử lý: {str(e)}"
+            }
+        
+        # Signal event để client biết đã xong (dù có lỗi)
+        with event_lock:
+            if request_id in request_events:
+                request_events[request_id].set()
+
+def queue_worker():
+    """Worker thread xử lý request từ queue"""
+    while True:
+        try:
+            # Lấy request từ queue (blocking)
+            request_id, image_data = request_queue.get()
+            
+            # Xử lý với lock để đảm bảo chỉ 1 request tại một thời điểm
+            with processing_lock:
+                print(f"🔄 Đang xử lý request {request_id}...")
+                process_invoice_request(request_id, image_data)
+                print(f"✅ Hoàn thành request {request_id}")
+            
+            # Đánh dấu task đã hoàn thành
+            request_queue.task_done()
+        except Exception as e:
+            print(f"❌ Lỗi trong worker thread: {e}")
+            import traceback
+            traceback.print_exc()
+
+# Worker thread sẽ được khởi động sau khi load model (trong __main__)
 
 # API Endpoint Trích xuất Hóa đơn (chỉ cần ảnh)
 @app.route('/extract_invoice', methods=['POST'])
@@ -231,29 +349,45 @@ def extract_invoice():
                 "message": "Không thể lấy dữ liệu ảnh."
             }), 400
         
-        # Tiền xử lý ảnh
-        pixel_values = load_image(image_data, max_num=6).to(torch.bfloat16).cuda()
+        # Tạo request ID và Event
+        request_id = str(uuid.uuid4())
+        request_event = threading.Event()
         
-        # Cấu hình Generation (mặc định)
-        generation_config = dict(
-            max_new_tokens=1024, 
-            do_sample=False,
-            temperature=0.0,
-            num_beams=3, 
-            repetition_penalty=3.5
-        )
+        # Lưu event
+        with event_lock:
+            request_events[request_id] = request_event
         
-        # Chạy mô hình với question mặc định
-        with torch.no_grad():
-            response = model.chat(tokenizer, pixel_values, DEFAULT_QUESTION, generation_config)
-
-        # Trả về kết quả
+        # Thêm vào queue
+        request_queue.put((request_id, image_data))
+        queue_size = request_queue.qsize()
+        
+        print(f"📥 Đã thêm request {request_id} vào queue (queue size: {queue_size})")
+        
+        # Đợi kết quả với Event (không cần polling - hiệu quả hơn)
+        timeout = 300  # 5 phút timeout
+        if request_event.wait(timeout=timeout):
+            # Event được signal - request đã xong
+            with result_lock:
+                if request_id in result_store:
+                    result = result_store.pop(request_id)
+                    status_code = 200 if result.get("status") == "success" else 500
+                    
+                    # Cleanup event
+                    with event_lock:
+                        request_events.pop(request_id, None)
+                    
+                    return jsonify(result), status_code
+        
+        # Timeout - Event không được signal trong thời gian chờ
+        with event_lock:
+            request_events.pop(request_id, None)
+        with result_lock:
+            result_store.pop(request_id, None)
+        
         return jsonify({
-            "status": "success",
-            "data": {
-                "extraction_result": response
-            }
-        }), 200
+            "status": "error",
+            "message": "Request timeout - xử lý quá lâu"
+        }), 504
 
     except requests.exceptions.RequestException as e:
         return jsonify({
@@ -274,4 +408,15 @@ if __name__ == '__main__':
         traceback.print_exc()
         os._exit(1)
     
-    app.run(host='0.0.0.0', port=8000, debug=False)
+    # Khởi động worker thread để xử lý queue
+    worker_thread = threading.Thread(target=queue_worker, daemon=True)
+    worker_thread.start()
+    print("✅ Queue worker thread đã khởi động")
+    print(f"   Queue system: Xử lý tuần tự (1 request tại một thời điểm)")
+    
+    # Tự động phát hiện port từ environment variable
+    # Hugging Face Spaces dùng port 7860, mặc định là 8000
+    port = int(os.environ.get('PORT', 8000))
+    print(f"🚀 Starting server on port {port}")
+    
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

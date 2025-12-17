@@ -6,14 +6,14 @@ API server sử dụng InternVL model để trích xuất thông tin từ hóa �
 
 ```
 PBL6/
-├── app.py                 # FastAPI server chính
+├── app.py                 # Flask server chính
 ├── requirements.txt       # Python dependencies
-├── Dockerfile            # Docker configuration
-├── download_model.py     # Script tải model từ Hugging Face
-├── internvl_local/       # Thư mục chứa model (không commit lên git)
-├── deploy_aws.sh         # Script tự động deploy lên AWS EC2
-├── setup_ec2.sh          # Script cài đặt môi trường trên EC2
-└── HUONG_DAN_TRIEN_KHAI_AWS.md  # Hướng dẫn chi tiết triển khai AWS
+├── Dockerfile             # Docker configuration (GPU)
+├── download_model.py      # Script tải model từ Hugging Face
+├── deploy_vastai.sh       # Script tự động deploy lên Vast.ai
+├── internvl_local/        # Thư mục chứa model (không commit lên git)
+├── HUONG_DAN_VASTAI.md    # Hướng dẫn chi tiết triển khai Vast.ai
+└── QUICKSTART_VASTAI.md   # Quick start guide cho Vast.ai
 ```
 
 ## Model
@@ -74,27 +74,33 @@ docker build -t vintern-invoice-api:1.0 .
 docker run --gpus all -p 8000:8000 vintern-invoice-api:1.0
 ```
 
-## Triển khai lên AWS EC2
+## Triển khai lên Cloud
 
-### Cách 1: Sử dụng script tự động (Khuyến nghị)
+### Option 1: Vast.ai (Rẻ nhất - $0.20/giờ)
 
 ```bash
-# Từ máy local của bạn
-bash deploy_aws.sh <EC2-IP> <path-to-key.pem>
+# Sử dụng script tự động
+chmod +x deploy_vastai.sh
+./deploy_vastai.sh <VASTAI-IP> <SSH-PORT> [KEY-FILE]
 
 # Ví dụ:
-bash deploy_aws.sh 54.123.45.67 ~/.ssh/my-key.pem
+./deploy_vastai.sh 123.45.67.89 22222
 ```
 
-Script này sẽ tự động:
-- Upload code lên EC2
-- Cài đặt Docker và NVIDIA Container Toolkit
-- **Tự động tải model nếu chưa có**
-- Build và chạy Docker container
+Xem chi tiết trong `HUONG_DAN_VASTAI.md` hoặc `QUICKSTART_VASTAI.md`
 
-### Cách 2: Triển khai thủ công
+### Option 2: Hugging Face Spaces (FREE)
 
-Xem chi tiết trong file `HUONG_DAN_TRIEN_KHAI_AWS.md`
+1. Push code lên GitHub
+2. Tạo Space tại https://huggingface.co/spaces
+3. Chọn Docker SDK và GPU T4
+4. Deploy tự động!
+
+Xem chi tiết trong `HUONG_DAN_DEPLOY_RE.md`
+
+### Option 3: Các nền tảng khác
+
+Xem so sánh chi phí và hướng dẫn trong `HUONG_DAN_DEPLOY_RE.md`
 
 ## API Endpoints
 
@@ -122,12 +128,12 @@ Trích xuất thông tin từ hóa đơn/biên lai.
 
 ### Swagger UI
 
-Truy cập: `http://localhost:8000/docs` hoặc `http://<EC2-IP>:8000/docs`
+Truy cập: `http://localhost:8000/docs` hoặc `http://<SERVER-IP>:8000/docs`
 
 ## Lưu ý về Model
 
 - Model không được commit lên git (đã thêm vào `.gitignore`)
-- Khi deploy lên server mới, script `deploy_aws.sh` sẽ tự động tải model
+- Khi deploy lên server mới, script `deploy_vastai.sh` sẽ tự động tải model
 - Nếu tải thủ công, chạy: `python3 download_model.py` trên server
 - Model sẽ được kiểm tra tự động, nếu đã tồn tại sẽ bỏ qua việc tải lại
 
@@ -173,5 +179,9 @@ docker exec -it vintern_server ls -la /app/internvl_local/
 ## License
 
 [Thêm license của bạn]
+
+
+
+
 
 

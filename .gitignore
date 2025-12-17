@@ -1,30 +1,49 @@
-# Model directory - không commit model vào git
-internvl_local/
-UnBoundingDATASET/
-
-# Python virtual environment
-pbl/
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
+pbl/  # Commented out - keep your virtual environment
 venv/
+env/
 ENV/
 .venv
 
-# Test results
-result_*.json
+# Model files (lớn, không commit)
+internvl_local/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Dataset files (lớn)
+UnBoundingDATASET/
+UnBoundingDATASET.zip
+*.zip
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
 
 # IDE
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
+# Test results
+result_*.json
+*.jpg.json
 
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
